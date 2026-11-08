@@ -24,6 +24,7 @@
 #include "Core/Config/UISettings.h"
 #include "Core/Core.h"
 #include "Core/FreeLookManager.h"
+#include "Core/HW/GCPad.h"
 #include "Core/HotkeyManager.h"
 #include "Core/IOS/IOS.h"
 #include "Core/State.h"
@@ -232,6 +233,12 @@ void HotkeyScheduler::Run()
 
       // Frame advance
       HandleFrameStepHotkeys();
+
+      // Pause Storage: toggle the emulated GameCube controller connection on Port 1.
+      if (!system.IsWii() && IsHotkey(HK_TOGGLE_GC_PORT_1))
+      {
+        Pad::RequestPort1ConnectionToggle();
+      }
 
       // Screenshot
       if (IsHotkey(HK_SCREENSHOT))

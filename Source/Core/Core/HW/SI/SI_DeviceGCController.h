@@ -56,6 +56,10 @@ protected:
   // Type of button combo from the last/current poll
   EButtonCombo m_last_button_combo = COMBO_NONE;
 
+  // Pause Storage connection override for GameCube Controller Port 1.
+  bool m_pause_storage_override_active = false;
+  bool m_pause_storage_port1_connected = false;
+
 public:
   // Constructor
   CSIDevice_GCController(Core::System& system, SIDevices device, int device_number);

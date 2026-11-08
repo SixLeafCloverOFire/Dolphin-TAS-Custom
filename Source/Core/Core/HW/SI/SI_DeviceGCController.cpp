@@ -19,6 +19,8 @@
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
 
+#include "VideoCommon/OnScreenDisplay.h"
+
 namespace SerialInterface
 {
 // --- standard GameCube controller ---
@@ -149,7 +151,35 @@ GCPadStatus CSIDevice_GCController::GetPadStatus()
     pad_status = Pad::GetStatus(m_device_number);
   }
 
-  HandleMoviePadStatus(m_system.GetMovie(), m_device_number, &pad_status);
+  Movie::MovieManager& movie = m_system.GetMovie();
+
+  if (m_device_number == 0)
+  {
+    // Always consume requests so a toggle pressed during movie playback or NetPlay cannot
+    // unexpectedly take effect after those modes end.
+    const u32 pending_toggles = Pad::ConsumePort1ConnectionToggleRequests();
+
+    if (!NetPlay::IsNetPlayRunning() && !movie.IsPlayingInput())
+    {
+      if ((pending_toggles & 1) != 0)
+      {
+        if (!m_pause_storage_override_active)
+        {
+          m_pause_storage_port1_connected = pad_status.isConnected;
+          m_pause_storage_override_active = true;
+        }
+
+        m_pause_storage_port1_connected = !m_pause_storage_port1_connected;
+        OSD::AddMessage(m_pause_storage_port1_connected ? "Port 1 Connected" :
+                                                         "Port 1 Disconnected");
+      }
+
+      if (m_pause_storage_override_active)
+        pad_status.isConnected = m_pause_storage_port1_connected;
+    }
+  }
+
+  HandleMoviePadStatus(movie, m_device_number, &pad_status);
 
   // Our GCAdapter code sets PAD_GET_ORIGIN when a new device has been connected.
   // Watch for this to calibrate real controllers on connection.
@@ -331,6 +361,8 @@ void CSIDevice_GCController::DoState(PointerWrap& p)
   p.Do(m_mode);
   p.Do(m_timer_button_combo_start);
   p.Do(m_last_button_combo);
+  p.Do(m_pause_storage_override_active);
+  p.Do(m_pause_storage_port1_connected);
 }
 
 CSIDevice_TaruKonga::CSIDevice_TaruKonga(Core::System& system, SIDevices device, int device_number)

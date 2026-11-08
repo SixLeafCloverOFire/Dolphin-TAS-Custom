@@ -21,6 +21,8 @@ void HotkeyTAS::CreateMainLayout()
       CreateGroupBox(tr("Frame Advance"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_FRAME_ADVANCE)));
   m_main_layout->addWidget(
       CreateGroupBox(tr("Movie"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_MOVIE)));
+  m_main_layout->addWidget(CreateGroupBox(
+      tr("Pause Storage"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_PAUSE_STORAGE)));
 
   setLayout(m_main_layout);
 }

@@ -3,6 +3,8 @@
 
 #include "Core/HW/GCPad.h"
 
+#include <atomic>
+
 #include "Common/Common.h"
 #include "Core/HW/GCPadEmu.h"
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
@@ -12,6 +14,7 @@
 namespace Pad
 {
 static InputConfig s_config("GCPadNew", _trans("Pad"), "GCPad", "Pad");
+static std::atomic<u32> s_pending_port1_connection_toggles{0};
 InputConfig* GetConfig()
 {
   return &s_config;
@@ -19,6 +22,7 @@ InputConfig* GetConfig()
 
 void Shutdown()
 {
+  s_pending_port1_connection_toggles.store(0, std::memory_order_relaxed);
   s_config.UnregisterHotplugCallback();
 
   s_config.ClearControllers();
@@ -26,6 +30,8 @@ void Shutdown()
 
 void Initialize()
 {
+  s_pending_port1_connection_toggles.store(0, std::memory_order_relaxed);
+
   if (s_config.ControllersNeedToBeCreated())
   {
     for (unsigned int i = 0; i < 4; ++i)
@@ -76,5 +82,15 @@ void ResetRumble(const int pad_num)
 bool GetMicButton(const int pad_num)
 {
   return static_cast<GCPad*>(s_config.GetController(pad_num))->GetMicButton();
+}
+
+void RequestPort1ConnectionToggle()
+{
+  s_pending_port1_connection_toggles.fetch_add(1, std::memory_order_relaxed);
+}
+
+u32 ConsumePort1ConnectionToggleRequests()
+{
+  return s_pending_port1_connection_toggles.exchange(0, std::memory_order_relaxed);
 }
 }  // namespace Pad

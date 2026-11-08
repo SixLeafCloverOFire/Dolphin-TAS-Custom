@@ -31,4 +31,8 @@ void Rumble(int pad_num, ControlState strength);
 void ResetRumble(int pad_num);
 
 bool GetMicButton(int pad_num);
+
+// Pause Storage: request a frame-boundary connection toggle for GameCube Port 1.
+void RequestPort1ConnectionToggle();
+u32 ConsumePort1ConnectionToggleRequests();
 }  // namespace Pad

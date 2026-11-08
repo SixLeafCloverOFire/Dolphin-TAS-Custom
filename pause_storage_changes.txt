@@ -1,0 +1,212 @@
+diff --git a/Source/Core/Core/HW/GCPad.cpp b/Source/Core/Core/HW/GCPad.cpp
+index 188882c58a..c1116562f3 100644
+--- a/Source/Core/Core/HW/GCPad.cpp
++++ b/Source/Core/Core/HW/GCPad.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include "Core/HW/GCPad.h"
+ 
++#include <atomic>
++
+ #include "Common/Common.h"
+ #include "Core/HW/GCPadEmu.h"
+ #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
+@@ -12,6 +14,7 @@
+ namespace Pad
+ {
+ static InputConfig s_config("GCPadNew", _trans("Pad"), "GCPad", "Pad");
++static std::atomic<u32> s_pending_port1_connection_toggles{0};
+ InputConfig* GetConfig()
+ {
+   return &s_config;
+@@ -19,6 +22,7 @@ InputConfig* GetConfig()
+ 
+ void Shutdown()
+ {
++  s_pending_port1_connection_toggles.store(0, std::memory_order_relaxed);
+   s_config.UnregisterHotplugCallback();
+ 
+   s_config.ClearControllers();
+@@ -26,6 +30,8 @@ void Shutdown()
+ 
+ void Initialize()
+ {
++  s_pending_port1_connection_toggles.store(0, std::memory_order_relaxed);
++
+   if (s_config.ControllersNeedToBeCreated())
+   {
+     for (unsigned int i = 0; i < 4; ++i)
+@@ -77,4 +83,14 @@ bool GetMicButton(const int pad_num)
+ {
+   return static_cast<GCPad*>(s_config.GetController(pad_num))->GetMicButton();
+ }
++
++void RequestPort1ConnectionToggle()
++{
++  s_pending_port1_connection_toggles.fetch_add(1, std::memory_order_relaxed);
++}
++
++u32 ConsumePort1ConnectionToggleRequests()
++{
++  return s_pending_port1_connection_toggles.exchange(0, std::memory_order_relaxed);
++}
+ }  // namespace Pad
+diff --git a/Source/Core/Core/HW/GCPad.h b/Source/Core/Core/HW/GCPad.h
+index 0ed5ff5d54..95dacc447c 100644
+--- a/Source/Core/Core/HW/GCPad.h
++++ b/Source/Core/Core/HW/GCPad.h
+@@ -31,4 +31,8 @@ void Rumble(int pad_num, ControlState strength);
+ void ResetRumble(int pad_num);
+ 
+ bool GetMicButton(int pad_num);
++
++// Pause Storage: request a frame-boundary connection toggle for GameCube Port 1.
++void RequestPort1ConnectionToggle();
++u32 ConsumePort1ConnectionToggleRequests();
+ }  // namespace Pad
+diff --git a/Source/Core/Core/HW/SI/SI_DeviceGCController.cpp b/Source/Core/Core/HW/SI/SI_DeviceGCController.cpp
+index 1f7a7b631b..295c4b0800 100644
+--- a/Source/Core/Core/HW/SI/SI_DeviceGCController.cpp
++++ b/Source/Core/Core/HW/SI/SI_DeviceGCController.cpp
+@@ -149,7 +149,33 @@ GCPadStatus CSIDevice_GCController::GetPadStatus()
+     pad_status = Pad::GetStatus(m_device_number);
+   }
+ 
+-  HandleMoviePadStatus(m_system.GetMovie(), m_device_number, &pad_status);
++  Movie::MovieManager& movie = m_system.GetMovie();
++
++  if (m_device_number == 0)
++  {
++    // Always consume requests so a toggle pressed during movie playback or NetPlay cannot
++    // unexpectedly take effect after those modes end.
++    const u32 pending_toggles = Pad::ConsumePort1ConnectionToggleRequests();
++
++    if (!NetPlay::IsNetPlayRunning() && !movie.IsPlayingInput())
++    {
++      if ((pending_toggles & 1) != 0)
++      {
++        if (!m_pause_storage_override_active)
++        {
++          m_pause_storage_port1_connected = pad_status.isConnected;
++          m_pause_storage_override_active = true;
++        }
++
++        m_pause_storage_port1_connected = !m_pause_storage_port1_connected;
++      }
++
++      if (m_pause_storage_override_active)
++        pad_status.isConnected = m_pause_storage_port1_connected;
++    }
++  }
++
++  HandleMoviePadStatus(movie, m_device_number, &pad_status);
+ 
+   // Our GCAdapter code sets PAD_GET_ORIGIN when a new device has been connected.
+   // Watch for this to calibrate real controllers on connection.
+@@ -331,6 +357,8 @@ void CSIDevice_GCController::DoState(PointerWrap& p)
+   p.Do(m_mode);
+   p.Do(m_timer_button_combo_start);
+   p.Do(m_last_button_combo);
++  p.Do(m_pause_storage_override_active);
++  p.Do(m_pause_storage_port1_connected);
+ }
+ 
+ CSIDevice_TaruKonga::CSIDevice_TaruKonga(Core::System& system, SIDevices device, int device_number)
+diff --git a/Source/Core/Core/HW/SI/SI_DeviceGCController.h b/Source/Core/Core/HW/SI/SI_DeviceGCController.h
+index 19b5bdb14b..1c1ab35c70 100644
+--- a/Source/Core/Core/HW/SI/SI_DeviceGCController.h
++++ b/Source/Core/Core/HW/SI/SI_DeviceGCController.h
+@@ -56,6 +56,10 @@ protected:
+   // Type of button combo from the last/current poll
+   EButtonCombo m_last_button_combo = COMBO_NONE;
+ 
++  // Pause Storage connection override for GameCube Controller Port 1.
++  bool m_pause_storage_override_active = false;
++  bool m_pause_storage_port1_connected = false;
++
+ public:
+   // Constructor
+   CSIDevice_GCController(Core::System& system, SIDevices device, int device_number);
+diff --git a/Source/Core/Core/HotkeyManager.cpp b/Source/Core/Core/HotkeyManager.cpp
+index 915dc0d6d7..7f956ab4fb 100644
+--- a/Source/Core/Core/HotkeyManager.cpp
++++ b/Source/Core/Core/HotkeyManager.cpp
+@@ -197,7 +197,8 @@ constexpr std::array<const char*, NUM_HOTKEYS> s_hotkey_labels{{
+     _trans("4x"),
+ 
+     _trans("Show Skylanders Portal"),
+-    _trans("Show Infinity Base")
++    _trans("Show Infinity Base"),
++    _trans("Toggle Controller Port 1")
+ }};
+ // clang-format on
+ static_assert(NUM_HOTKEYS == s_hotkey_labels.size(), "Wrong count of hotkey_labels");
+@@ -325,7 +326,8 @@ constexpr std::array<HotkeyGroupInfo, NUM_HOTKEY_GROUPS> s_groups_info = {
+      {_trans("GBA Core"), HK_GBA_LOAD, HK_GBA_RESET, true},
+      {_trans("GBA Volume"), HK_GBA_VOLUME_DOWN, HK_GBA_TOGGLE_MUTE, true},
+      {_trans("GBA Window Size"), HK_GBA_1X, HK_GBA_4X, true},
+-     {_trans("USB Emulation Devices"), HK_SKYLANDERS_PORTAL, HK_INFINITY_BASE}}};
++     {_trans("USB Emulation Devices"), HK_SKYLANDERS_PORTAL, HK_INFINITY_BASE},
++     {_trans("Pause Storage"), HK_TOGGLE_GC_PORT_1, HK_TOGGLE_GC_PORT_1}}};
+ 
+ HotkeyManager::HotkeyManager()
+ {
+diff --git a/Source/Core/Core/HotkeyManager.h b/Source/Core/Core/HotkeyManager.h
+index 6a1b75458f..a2a585563b 100644
+--- a/Source/Core/Core/HotkeyManager.h
++++ b/Source/Core/Core/HotkeyManager.h
+@@ -186,6 +186,7 @@ enum Hotkey
+ 
+   HK_SKYLANDERS_PORTAL,
+   HK_INFINITY_BASE,
++  HK_TOGGLE_GC_PORT_1,
+ 
+   NUM_HOTKEYS,
+ };
+@@ -219,6 +220,7 @@ enum HotkeyGroup : int
+   HKGP_GBA_VOLUME,
+   HKGP_GBA_SIZE,
+   HKGP_USB_EMU,
++  HKGP_PAUSE_STORAGE,
+ 
+   NUM_HOTKEY_GROUPS,
+ };
+diff --git a/Source/Core/DolphinQt/Config/Mapping/HotkeyTAS.cpp b/Source/Core/DolphinQt/Config/Mapping/HotkeyTAS.cpp
+index 8afd15620b..be46bd2707 100644
+--- a/Source/Core/DolphinQt/Config/Mapping/HotkeyTAS.cpp
++++ b/Source/Core/DolphinQt/Config/Mapping/HotkeyTAS.cpp
+@@ -21,6 +21,8 @@ void HotkeyTAS::CreateMainLayout()
+       CreateGroupBox(tr("Frame Advance"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_FRAME_ADVANCE)));
+   m_main_layout->addWidget(
+       CreateGroupBox(tr("Movie"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_MOVIE)));
++  m_main_layout->addWidget(CreateGroupBox(
++      tr("Pause Storage"), HotkeyManagerEmu::GetHotkeyGroup(HKGP_PAUSE_STORAGE)));
+ 
+   setLayout(m_main_layout);
+ }
+diff --git a/Source/Core/DolphinQt/HotkeyScheduler.cpp b/Source/Core/DolphinQt/HotkeyScheduler.cpp
+index 478454ed5a..32593f9b8b 100644
+--- a/Source/Core/DolphinQt/HotkeyScheduler.cpp
++++ b/Source/Core/DolphinQt/HotkeyScheduler.cpp
+@@ -24,6 +24,7 @@
+ #include "Core/Config/UISettings.h"
+ #include "Core/Core.h"
+ #include "Core/FreeLookManager.h"
++#include "Core/HW/GCPad.h"
+ #include "Core/HotkeyManager.h"
+ #include "Core/IOS/IOS.h"
+ #include "Core/State.h"
+@@ -233,6 +234,13 @@ void HotkeyScheduler::Run()
+       // Frame advance
+       HandleFrameStepHotkeys();
+ 
++      // Pause Storage: toggle the emulated GameCube controller connection on Port 1.
++      if (!system.IsWii() && IsHotkey(HK_TOGGLE_GC_PORT_1))
++      {
++        Pad::RequestPort1ConnectionToggle();
++        OSD::AddMessage("Pause Storage: Port 1 toggle requested");
++      }
++
+       // Screenshot
+       if (IsHotkey(HK_SCREENSHOT))
+         emit ScreenShotHotkey();
